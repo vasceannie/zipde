@@ -29,19 +29,19 @@ class CustomVectorDB(VannaBase):
         with self.vector_conn.cursor() as cur:
             # Create tables for storing embeddings and training data
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS ddl_store (
+                CREATE TABLE IF NOT EXISTS vanna_ddl_store (
                     id SERIAL PRIMARY KEY,
                     ddl_text TEXT,
                     embedding vector(1024)  -- Adjust vector size based on your model
                 );
                 
-                CREATE TABLE IF NOT EXISTS documentation_store (
+                CREATE TABLE IF NOT EXISTS vanna_documentation_store (
                     id SERIAL PRIMARY KEY,
                     doc_text TEXT,
                     embedding vector(1024)
                 );
                 
-                CREATE TABLE IF NOT EXISTS question_sql_store (
+                CREATE TABLE IF NOT EXISTS vanna_question_sql_store (
                     id SERIAL PRIMARY KEY,
                     question TEXT,
                     sql_query TEXT,
@@ -72,7 +72,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(ddl)
         with self.vector_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO ddl_store (ddl_text, embedding) VALUES (%s, %s) RETURNING id",
+                "INSERT INTO vanna_ddl_store (ddl_text, embedding) VALUES (%s, %s) RETURNING id",
                 (ddl, embedding)
             )
             id = cur.fetchone()[0]
@@ -83,7 +83,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(doc)
         with self.vector_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO documentation_store (doc_text, embedding) VALUES (%s, %s) RETURNING id",
+                "INSERT INTO vanna_documentation_store (doc_text, embedding) VALUES (%s, %s) RETURNING id",
                 (doc, embedding)
             )
             id = cur.fetchone()[0]
@@ -94,7 +94,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(question)
         with self.vector_conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO question_sql_store (question, sql_query, embedding) VALUES (%s, %s, %s) RETURNING id",
+                "INSERT INTO vanna_question_sql_store (question, sql_query, embedding) VALUES (%s, %s, %s) RETURNING id",
                 (question, sql, embedding)
             )
             id = cur.fetchone()[0]
@@ -106,9 +106,9 @@ class CustomVectorDB(VannaBase):
         with self.vector_conn.cursor() as cur:
             cur.execute("""
                 SELECT ddl_text, 1 - (embedding <-> %s::vector) as similarity 
-                FROM ddl_store 
+                FROM vanna_ddl_store 
                 ORDER BY similarity DESC 
-                LIMIT 5
+                LIMIT 10
             """, (embedding,))
             return [row[0] for row in cur.fetchall()]
 
@@ -117,9 +117,9 @@ class CustomVectorDB(VannaBase):
         with self.vector_conn.cursor() as cur:
             cur.execute("""
                 SELECT doc_text, 1 - (embedding <-> %s::vector) as similarity 
-                FROM documentation_store 
+                FROM vanna_documentation_store 
                 ORDER BY similarity DESC 
-                LIMIT 5
+                LIMIT 10
             """, (embedding,))
             return [row[0] for row in cur.fetchall()]
 
@@ -128,29 +128,29 @@ class CustomVectorDB(VannaBase):
         with self.vector_conn.cursor() as cur:
             cur.execute("""
                 SELECT question, sql_query, 1 - (embedding <-> %s::vector) as similarity 
-                FROM question_sql_store 
+                FROM vanna_question_sql_store 
                 ORDER BY similarity DESC 
-                LIMIT 5
+                LIMIT 10
             """, (embedding,))
             return [(row[0], row[1]) for row in cur.fetchall()]
 
     def get_training_data(self, **kwargs) -> pd.DataFrame:
         with self.vector_conn.cursor() as cur:
             cur.execute("""
-                SELECT 'ddl' as type, id, ddl_text as text FROM ddl_store
+                SELECT 'ddl' as type, id, ddl_text as text FROM vanna_ddl_store
                 UNION ALL
-                SELECT 'documentation' as type, id, doc_text as text FROM documentation_store
+                SELECT 'documentation' as type, id, doc_text as text FROM vanna_documentation_store
                 UNION ALL
-                SELECT 'question_sql' as type, id, question || ' | ' || sql_query as text FROM question_sql_store
+                SELECT 'question_sql' as type, id, question || ' | ' || sql_query as text FROM vanna_question_sql_store
             """)
             return pd.DataFrame(cur.fetchall(), columns=['type', 'id', 'text'])
 
     def remove_training_data(self, id: str, **kwargs) -> bool:
         with self.vector_conn.cursor() as cur:
             cur.execute("""
-                DELETE FROM ddl_store WHERE id = %s;
-                DELETE FROM documentation_store WHERE id = %s;
-                DELETE FROM question_sql_store WHERE id = %s;
+                DELETE FROM vanna_ddl_store WHERE id = %s;
+                DELETE FROM vanna_documentation_store WHERE id = %s;
+                DELETE FROM vanna_question_sql_store WHERE id = %s;
             """, (id, id, id))
             self.vector_conn.commit()
             return True
@@ -161,7 +161,14 @@ class MyCustomLLM(VannaBase):
         self.model = config.get('model', 'llama3.2')  # Default model
         
     def system_message(self) -> str:
-        return "You are a helpful AI assistant that generates SQL queries and helps users interpret data."
+        return (
+            "The user will provide SQL queries or questions for you to convert into SQL syntax. "
+            "You are working with Microsoft SQL Server, so make sure to wrap all table names and column names "
+            "in square brackets [ ] to handle spaces, special characters, or reserved keywords. "
+            "For example, convert `Contract #` to `[Contract #]`. "
+            "If the user requests information, guess the business question being answered by the query "
+            "without referencing specific table names in the response."
+        )
         
     def user_message(self, message: str) -> str:
         return f"User: {message}"
@@ -186,8 +193,13 @@ class MyCustomLLM(VannaBase):
 class MyVanna(CustomVectorDB, Ollama):
     def __init__(self, config=None):
         if config is None:
-            config = {}
+            config = {
+                'model': 'llama3.2'
+            }
             
+        self.connect_to_mssql(
+            odbc_conn_str=f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER=localhost;DATABASE=kpdb;Trusted_Connection=yes"
+        )    
         self.config = config
         self.max_tokens = 4096
         self.static_documentation = ""
@@ -196,38 +208,80 @@ class MyVanna(CustomVectorDB, Ollama):
         CustomVectorDB.__init__(self, config)
         Ollama.__init__(self, config)
 
-    def submit_prompt(self, prompt, **kwargs) -> str:
-        # Format the prompt properly for Ollama
-        messages = [
-            {"role": "system", "content": "You are a helpful AI assistant that generates SQL queries."},
-            {"role": "user", "content": prompt if isinstance(prompt, str) else prompt[-1]}
-        ]
-        
-        # Make the API call
-        response = requests.post(
-            "http://localhost:11434/api/chat",
-            json={"model": self.config.get('model', 'llama3.2'), 
-                  "messages": messages}
+    def system_message(self, message: str = None) -> str:
+        # If a message is provided, use it, otherwise use default
+        if message:
+            return message
+        return (
+            "The user will provide SQL queries or questions for you to convert into SQL syntax. ",
+            "You are working with Microsoft SQL Server, so make sure to wrap all table names and column names ",
+            "in square brackets [ ] to handle spaces, special characters, or reserved keywords. ",
+            "For example, convert `Contract #` to `[Contract #]`. ",
+            "If the user requests information, guess the business question being answered by the query ",
+            "without referencing specific table names in the response."
         )
         
-        if response.status_code == 200:
-            return response.json().get('response', '')
-        else:
-            raise Exception(f"Failed to get response: {response.text}")
+    def user_message(self, message: str) -> str:
+        return f"User: {message}"
+        
+    def assistant_message(self, message: str) -> str:
+        return f"Assistant: {message}"
+
+    def submit_prompt(self, prompt, **kwargs) -> str:
+        try:
+            # Format the messages properly
+            if isinstance(prompt, list):
+                messages = prompt
+            else:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": self.system_message()
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+
+            # Make the API call
+            response = requests.post(
+                "http://localhost:11434/api/chat",
+                json={
+                    "model": self.config.get('model', 'llama3.2'),
+                    "messages": messages,
+                    "stream": True
+                }
+            )
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    return result.get('response', '')
+                except Exception as e:
+                    print(f"Error parsing JSON: {e}")
+                    return response.text
+            else:
+                raise Exception(f"API call failed with status {response.status_code}")
+                
+        except Exception as e:
+            print(f"Error in submit_prompt: {str(e)}")
+            raise
 
     def get_sql_prompt(self, question: str, question_sql_list: list, ddl_list: list, doc_list: list, **kwargs):
         prompt = f"""Given the following question: {question}
 
-Related DDL:
-{' '.join(ddl_list)}
+            Related DDL:
+            {' '.join(ddl_list)}
 
-Related documentation:
-{' '.join(doc_list)}
+            Related documentation:
+            {' '.join(doc_list)}
 
-Similar questions and their SQL:
-{' '.join([f'Q: {q} A: {sql}' for q, sql in question_sql_list])}
+            Similar questions and their SQL:
+            {' '.join([f'Q: {q} A: {sql}' for q, sql in question_sql_list])}
 
-Generate a SQL query to answer the question."""
+            Generate a SQL query to answer the question.
+            """
         return prompt
 
     def get_followup_questions_prompt(self, question: str, question_sql_list: list, ddl_list: list, doc_list: list, **kwargs):

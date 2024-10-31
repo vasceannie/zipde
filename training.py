@@ -2,54 +2,12 @@ import pandas as pd
 from sqlserver import MyVanna
 from vanna.ollama import Ollama
 from get_sample_queries import get_sample_queries
-from sql_ddl_reformatted import get_ddl_statements
+from results.sql_ddl_reformatted import get_ddl_statements
 
 def initialize_vanna():
     # Initialize Vanna with NV-Embed model
     vn = MyVanna(config={'model': 'llama3.2'})
     return vn
-
-# def get_schema_training_data():
-#     """Get schema information from key tables"""
-#     return """
-#     -- GL String Tables
-#     CREATE TABLE [dbo].[GLString_Account_UAT](
-#         [Name*] [nvarchar](255),
-#         [Active] [nvarchar](255),
-#         [Lookup*] [nvarchar](255),
-#         [Description] [nvarchar](255),
-#         [External Ref Num] [nvarchar](255),
-#         [External Ref Code] [nvarchar](255),
-#         [Chart of Accounts] [nvarchar](255)
-#     );
-
-#     CREATE TABLE [dbo].[GLString_Activity_Prod](
-#         [Lookup] [nvarchar](255),
-#         [Name] [nvarchar](255),
-#         [Description] [nvarchar](255),
-#         [External Ref Num] [nvarchar](255),
-#         [Default] [nvarchar](255),
-#         [Active] [nvarchar](255)
-#     );
-
-#     -- Contract Related Tables
-#     CREATE TABLE [dbo].[OneLink_Contract_Union](
-#         [Contract #] [nvarchar](258),
-#         [Contract Type Name] [nvarchar](255),
-#         [filename] [nvarchar](255),
-#         [Supplier Number] [nvarchar](255),
-#         [Replacement Vendor ID] [nvarchar](255),
-#         [final_vendor] [nvarchar](255)
-#     );
-
-#     CREATE TABLE [dbo].[OL_Supplier_Master](
-#         [VENDOR_ID] [nvarchar](255),
-#         [NAME1] [nvarchar](255),
-#         [VENDOR_STATUS] [nvarchar](255),
-#         [replacement_vendor] [nvarchar](255),
-#         [final_vendor] [nvarchar](255)
-#     );
-#     """
 
 def get_business_documentation():
     """Get business context and documentation"""
@@ -84,6 +42,9 @@ def train_vanna():
     
     # Get information schema for comprehensive training
     print("Training from information schema...")
+    vn.connect_to_mssql(
+        odbc_conn_str="DRIVER={{ODBC Driver 17 for SQL Server}};SERVER=localhost;DATABASE=kpdb;Trusted_Connection=yes"
+    )
     df_information_schema = vn.run_sql("SELECT * FROM INFORMATION_SCHEMA.COLUMNS")
     plan = vn.get_training_plan_generic(df_information_schema)
     print(plan)

@@ -5,3 +5,7 @@
 /results
 /logs
 /__pycache__
+/kp_contracts
+/kp_staged
+/scripting
+/ad-hoc
