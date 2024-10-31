@@ -1,2 +1,7 @@
 *.zip
 *.csv
+*.sql
+/.venv
+/results
+/logs
+/__pycache__
