@@ -6,6 +6,9 @@ from vanna.ollama import Ollama
 from vanna.base import VannaBase
 import numpy as np
 import requests
+from vanna.flask import VannaFlaskApp
+from vanna.vannadb import VannaDB_VectorStore
+
 
 class CustomVectorDB(VannaBase):
     def __init__(self, config=None):
@@ -102,7 +105,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(question)
         with self.vector_conn.cursor() as cur:
             cur.execute("""
-                SELECT ddl_text, 1 - (embedding <=> %s) as similarity 
+                SELECT ddl_text, 1 - (embedding <-> %s::vector) as similarity 
                 FROM ddl_store 
                 ORDER BY similarity DESC 
                 LIMIT 5
@@ -113,7 +116,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(question)
         with self.vector_conn.cursor() as cur:
             cur.execute("""
-                SELECT doc_text, 1 - (embedding <=> %s) as similarity 
+                SELECT doc_text, 1 - (embedding <-> %s::vector) as similarity 
                 FROM documentation_store 
                 ORDER BY similarity DESC 
                 LIMIT 5
@@ -124,7 +127,7 @@ class CustomVectorDB(VannaBase):
         embedding = self.generate_embedding(question)
         with self.vector_conn.cursor() as cur:
             cur.execute("""
-                SELECT question, sql_query, 1 - (embedding <=> %s) as similarity 
+                SELECT question, sql_query, 1 - (embedding <-> %s::vector) as similarity 
                 FROM question_sql_store 
                 ORDER BY similarity DESC 
                 LIMIT 5
@@ -152,31 +155,101 @@ class CustomVectorDB(VannaBase):
             self.vector_conn.commit()
             return True
 
+class MyCustomLLM(VannaBase):
+    def __init__(self, config=None):
+        super().__init__(config)
+        self.model = config.get('model', 'llama3.2')  # Default model
+        
+    def system_message(self) -> str:
+        return "You are a helpful AI assistant that generates SQL queries and helps users interpret data."
+        
+    def user_message(self, message: str) -> str:
+        return f"User: {message}"
+        
+    def assistant_message(self, message: str) -> str:
+        return f"Assistant: {message}"
+
+    def submit_prompt(self, prompt, **kwargs) -> str:
+        # Implement Ollama chat functionality
+        response = requests.post(
+            "http://localhost:11434/api/chat",
+            json={"model": self.model, "messages": [
+                {"role": "system", "content": self.system_message()},
+                {"role": "user", "content": prompt}
+            ]}
+        )
+        if response.status_code == 200:
+            return response.json().get('response', '')
+        else:
+            raise Exception(f"Failed to get response: {response.text}")
+
 class MyVanna(CustomVectorDB, Ollama):
     def __init__(self, config=None):
         if config is None:
             config = {}
-        
-        # Ensure model is specified
-        if 'model' not in config:
-            config['model'] = 'mxbai-embed-large'
             
-        CustomVectorDB.__init__(self, config=config)
-        Ollama.__init__(self, config=config)
+        self.config = config
+        self.max_tokens = 4096
+        self.static_documentation = ""
+            
+        # Initialize both parent classes
+        CustomVectorDB.__init__(self, config)
+        Ollama.__init__(self, config)
+
+    def submit_prompt(self, prompt, **kwargs) -> str:
+        # Format the prompt properly for Ollama
+        messages = [
+            {"role": "system", "content": "You are a helpful AI assistant that generates SQL queries."},
+            {"role": "user", "content": prompt if isinstance(prompt, str) else prompt[-1]}
+        ]
         
-        try:
-            self.sql_conn = pyodbc.connect(
-                "DRIVER={ODBC Driver 17 for SQL Server};"
-                "SERVER=localhost;"
-                "DATABASE=kpdb;"
-                "Trusted_Connection=yes;"
-            )
-            self.run_sql_is_set = True
-        except pyodbc.Error as e:
-            raise ConnectionError(f"Failed to connect to SQL Server: {str(e)}")
+        # Make the API call
+        response = requests.post(
+            "http://localhost:11434/api/chat",
+            json={"model": self.config.get('model', 'llama3.2'), 
+                  "messages": messages}
+        )
+        
+        if response.status_code == 200:
+            return response.json().get('response', '')
+        else:
+            raise Exception(f"Failed to get response: {response.text}")
 
-    def run_sql(self, sql: str) -> pd.DataFrame:
-        return pd.read_sql_query(sql, self.sql_conn)
+    def get_sql_prompt(self, question: str, question_sql_list: list, ddl_list: list, doc_list: list, **kwargs):
+        prompt = f"""Given the following question: {question}
 
-# Initialize Vanna with Mistral model
-vn = MyVanna(config={'model': 'mxbai-embed-large'})
+Related DDL:
+{' '.join(ddl_list)}
+
+Related documentation:
+{' '.join(doc_list)}
+
+Similar questions and their SQL:
+{' '.join([f'Q: {q} A: {sql}' for q, sql in question_sql_list])}
+
+Generate a SQL query to answer the question."""
+        return prompt
+
+    def get_followup_questions_prompt(self, question: str, question_sql_list: list, ddl_list: list, doc_list: list, **kwargs):
+        prompt = f"""Based on the question "{question}", suggest 3 relevant follow-up questions."""
+        return prompt
+
+# Initialize Vanna with the correct model name
+vn = MyVanna(config={
+    'model': 'llama3.2'
+})
+
+# Connect to MSSQL using the proper connection string format
+vn.connect_to_mssql(
+    odbc_conn_str=f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER=localhost;DATABASE=kpdb;Trusted_Connection=yes"
+)
+
+# Initialize Flask app
+flask_app = VannaFlaskApp(
+    vn=vn, 
+    allow_llm_to_see_data=True, 
+    logo='banner-logo-rise-now2x.png', 
+    title='Database Deblunker', 
+    subtitle='Deblunk that base of data real good.'
+)
+flask_app.run()

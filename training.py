@@ -2,11 +2,11 @@ import pandas as pd
 from sqlserver import MyVanna
 from vanna.ollama import Ollama
 from get_sample_queries import get_sample_queries
-from sql_ddl import get_ddl_statements
+from sql_ddl_reformatted import get_ddl_statements
 
 def initialize_vanna():
     # Initialize Vanna with NV-Embed model
-    vn = MyVanna(config={'model': 'mxbai-embed-large'})
+    vn = MyVanna(config={'model': 'llama3.2'})
     return vn
 
 # def get_schema_training_data():
